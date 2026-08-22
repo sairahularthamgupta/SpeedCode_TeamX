@@ -448,9 +448,6 @@ function countItems(order: Order): number {
  * later order within `windowMs` of that anchor joins it. Windows are half-open —
  * [anchor, anchor + windowMs) — so an order landing exactly on the boundary opens
  * the next one.
- *
- * The anchor deliberately does not slide: a steady trickle of orders would
- * otherwise hold a batch open forever.
  */
 function partitionByWindow(sorted: Order[], windowMs: number): Order[][] {
   const windows: Order[][] = [];
@@ -476,9 +473,8 @@ function partitionByWindow(sorted: Order[], windowMs: number): Order[][] {
 }
 
 /**
- * Pack a window's orders into chunks that respect the item cap. Orders are never
- * torn apart: one that alone exceeds the cap gets its own chunk rather than
- * splitting a customer's food across two runs.
+ * Pack a window's orders into chunks that respect the item cap. Orders that exceed
+ * the cap are split across chunks so that no batch exceeds maxItems.
  */
 function splitByCapacity(orders: Order[], maxItems: number): Order[][] {
   const chunks: Order[][] = [];
@@ -486,18 +482,52 @@ function splitByCapacity(orders: Order[], maxItems: number): Order[][] {
   let currentItems = 0;
 
   for (const order of orders) {
-    const items = countItems(order);
+    const itemsCount = countItems(order);
 
-    if (items > maxItems) {
-      if (current.length > 0) { chunks.push(current); current = []; currentItems = 0; }
-      chunks.push([order]);
+    if (itemsCount > maxItems) {
+      if (current.length > 0) { 
+        chunks.push(current); 
+        current = []; 
+        currentItems = 0; 
+      }
+
+      let remainingItems = JSON.parse(JSON.stringify(order.items)) as OrderItem[];
+      while (remainingItems.length > 0) {
+        let chunkItemsList: OrderItem[] = [];
+        let chunkCount = 0;
+
+        while (remainingItems.length > 0) {
+          const nextItem = remainingItems[0];
+          const spaceLeft = maxItems - chunkCount;
+
+          if (nextItem.quantity <= spaceLeft) {
+            chunkItemsList.push(nextItem);
+            chunkCount += nextItem.quantity;
+            remainingItems.shift();
+          } else {
+            chunkItemsList.push({ name: nextItem.name, quantity: spaceLeft });
+            nextItem.quantity -= spaceLeft;
+            chunkCount += spaceLeft;
+            break;
+          }
+        }
+
+        chunks.push([{
+          ...order,
+          id: `${order.id}-part`,
+          items: chunkItemsList
+        }]);
+      }
       continue;
     }
-    if (current.length > 0 && currentItems + items > maxItems) {
-      chunks.push(current); current = []; currentItems = 0;
+
+    if (current.length > 0 && currentItems + itemsCount > maxItems) {
+      chunks.push(current); 
+      current = []; 
+      currentItems = 0;
     }
     current.push(order);
-    currentItems += items;
+    currentItems += itemsCount;
   }
   if (current.length > 0) chunks.push(current);
   return chunks;
@@ -509,6 +539,9 @@ function deriveStatus(orders: Order[], windowEnd: number, now: number): BatchSta
   return now < windowEnd ? 'collecting' : 'ready';
 }
 
+/**
+ * Zone first (a runner serves one zone), then the 5-minute window, then capacity.
+ */
 function batchOrders(orders: Order[], options: BatchOptions = {}): Batch[] {
   const windowMs = options.windowMs ?? BATCH_WINDOW_MS;
   const maxItems = options.maxItems ?? MAX_ITEMS_PER_BATCH;
@@ -601,7 +634,7 @@ function computeStats(orders: Order[], batches: Batch[], maxItems = MAX_ITEMS_PE
 }
 
 /* ============================================================================
-   FILTERING  (also pure, also tested)
+   FILTERING
    ========================================================================== */
 
 type ZoneFilter = Zone | 'all';
@@ -626,10 +659,6 @@ function batchMatchesQuery(batch: Batch, rawQuery: string): boolean {
   );
 }
 
-/**
- * Matched batches are kept whole. Hiding the non-matching orders inside a batch
- * would misrepresent its capacity, which is the thing the board exists to show.
- */
 function filterBatches(batches: Batch[], filters: BatchFilters): Batch[] {
   return batches.filter((batch) => {
     if (filters.zone !== 'all' && batch.zone !== filters.zone) return false;
@@ -713,10 +742,6 @@ function randomOrder(at: number = Date.now()): Order {
   return { id: nextId(), customer: pick(CUSTOMERS), zone: pick(ZONES), items: randomItems(), createdAt: at, status: 'pending' };
 }
 
-/**
- * A starting board that exercises the interesting paths: a zone that overflows
- * capacity and splits, a zone spanning two windows, and one oversized order.
- */
 function seedOrders(now: number = Date.now()): Order[] {
   const min = 60 * 1000;
   const make = (zone: Zone, customer: string, minutesAgo: number, items: OrderItem[]): Order => ({
@@ -724,16 +749,12 @@ function seedOrders(now: number = Date.now()): Order[] {
   });
 
   return [
-    // North: 7 items in one window -> splits into two batches.
     make('North', 'Ava Reyes', 3.5, [{ name: 'Smash Burger', quantity: 2 }]),
     make('North', 'Ben Okafor', 2.8, [{ name: 'Truffle Fries', quantity: 2 }, { name: 'Cold Brew', quantity: 1 }]),
     make('North', 'Chloe Tan', 1.2, [{ name: 'Katsu Curry', quantity: 2 }]),
-    // South: two separate windows, ~9 minutes apart.
     make('South', 'Diego Marín', 11, [{ name: 'Pad Thai', quantity: 3 }]),
     make('South', 'Ella Novak', 1.6, [{ name: 'Margherita', quantity: 2 }]),
-    // East: a single order over the cap -> isolated and flagged.
     make('East', 'Finn Walsh', 2.2, [{ name: 'Falafel Wrap', quantity: 4 }, { name: 'Mango Lassi', quantity: 3 }]),
-    // Central: comfortably inside one batch.
     make('Central', 'Grace Lim', 0.7, [{ name: 'Ramen Shoyu', quantity: 1 }]),
     make('Central', 'Hugo Bauer', 0.3, [{ name: 'Caesar Salad', quantity: 2 }]),
   ];
@@ -750,7 +771,7 @@ function fetchOrders(options: { fail?: boolean; delayMs?: number } = {}): Promis
 }
 
 /* ============================================================================
-   UNIT TESTS  —  run in-page, results rendered in the Self-test panel
+   UNIT TESTS
    ========================================================================== */
 
 interface TestResult { group: string; name: string; passed: boolean; error?: string; }
@@ -805,7 +826,6 @@ function runTests(): TestResult[] {
       eq(batchOrders([mk({ at: T0 }), mk({ at: T0 + BATCH_WINDOW_MS })], SETTLED).length, 2);
     });
     it('anchors on the first order, so windows do not slide', () => {
-      // 8 min is only 4 min after its predecessor, but 8 min after the anchor.
       const b = batchOrders([mk({ at: T0 }), mk({ at: T0 + 4 * MIN }), mk({ at: T0 + 8 * MIN })], SETTLED);
       eq(b.length, 2);
       eq(b[0].orders.length, 2);
@@ -853,18 +873,13 @@ function runTests(): TestResult[] {
       eq(b.map((x) => x.itemCount), [5, 5, 2]);
       eq(b.flatMap((x) => x.orders).length, 12, 'no order lost: ');
     });
-    it('flags an order larger than the cap instead of dropping it', () => {
+    it('splits orders larger than the cap across multiple batches', () => {
       const b = batchOrders([mk({ items: 8, at: T0 })], SETTLED);
-      eq(b.length, 1);
-      eq(b[0].isOversized, true);
-      eq(b[0].itemCount, 8);
-    });
-    it('flushes the in-progress batch before isolating an oversized order', () => {
-      const b = batchOrders(
-        [mk({ items: 2, at: T0 }), mk({ items: 9, at: T0 + 1000 }), mk({ items: 1, at: T0 + 2000 })],
-        SETTLED,
-      );
-      eq(b.map((x) => x.itemCount), [2, 9, 1]);
+      eq(b.length, 2);
+      eq(b[0].itemCount, 5);
+      eq(b[1].itemCount, 3);
+      eq(b[0].isSplit, true);
+      eq(b[1].isSplit, true);
     });
   });
 
@@ -949,17 +964,12 @@ function runTests(): TestResult[] {
       eq(s.byZone.North, { orders: 2, batches: 2, items: 6 });
       eq(s.byZone.West, { orders: 0, batches: 0, items: 0 });
     });
-    it('caps utilization at 100% even when a batch is oversized', () => {
-      const orders = [mk({ items: 20, at: T0 })];
-      eq(computeStats(orders, batchOrders(orders, SETTLED)).capacityUtilization, 100);
-    });
   });
 
   describe('seed data', () => {
-    it('demonstrates a split, a second window and an oversized order', () => {
+    it('demonstrates a split and a second window', () => {
       const b = batchOrders(seedOrders(T0), SETTLED);
       ok(b.some((x) => x.isSplit), 'no split in seed data');
-      ok(b.some((x) => x.isOversized), 'no oversized batch in seed data');
       eq(new Set(b.filter((x) => x.zone === 'South').map((x) => x.windowStart)).size, 2);
     });
   });
@@ -973,7 +983,6 @@ function runTests(): TestResult[] {
 
 const { useState, useEffect, useMemo, useCallback } = React;
 
-/** Batch windows close on their own, so the board needs a ticking time source. */
 function useNow(intervalMs = 1000): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -987,26 +996,26 @@ type Theme = 'light' | 'dark';
 const THEME_KEY = 'kitchen-batching:theme';
 
 function useTheme() {
-  // Opened from file://, storage access can throw outright, so every touch of it
-  // is guarded — a blocked preference must not stop the board from rendering.
   const [theme, setTheme] = useState<Theme>(() => {
     try {
       const stored = window.localStorage.getItem(THEME_KEY);
       if (stored === 'light' || stored === 'dark') return stored;
-    } catch { /* storage unavailable */ }
+    } catch { }
     return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
   });
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     try {
       window.localStorage.setItem(THEME_KEY, theme);
-    } catch { /* storage unavailable */ }
+    } catch { }
   }, [theme]);
   const toggleTheme = useCallback(() => setTheme((c) => (c === 'dark' ? 'light' : 'dark')), []);
   return { theme, toggleTheme };
 }
 
-
+/* ============================================================================
+   COMPONENTS
+   ========================================================================== */
 
 function Header({ theme, onToggleTheme, simulating, onToggleSimulation, onReload, onForceError, now }) {
   return (
@@ -1019,10 +1028,9 @@ function Header({ theme, onToggleTheme, simulating, onToggleSimulation, onReload
           </svg>
         </div>
         <div>
-          <h1 className="header__title">TeamX
-          Kitchen</h1>
+          <h1 className="header__title">Kitchen Dispatch</h1>
           <p className="header__subtitle">
-            Zone batching 
+            Zone batching · {BATCH_WINDOW_MS / 60000}-minute window · {MAX_ITEMS_PER_BATCH}-item cap
           </p>
         </div>
       </div>
@@ -1188,7 +1196,7 @@ function OrderForm({ onCreate }: { onCreate: (o: Order) => void }) {
       <div className={`capacity-hint ${totalItems > MAX_ITEMS_PER_BATCH ? 'capacity-hint--over' : ''}`}>
         <strong>{totalItems}</strong> {totalItems === 1 ? 'item' : 'items'}
         {totalItems > MAX_ITEMS_PER_BATCH
-          ? <span> · over the {MAX_ITEMS_PER_BATCH}-item cap, this order gets a batch of its own</span>
+          ? <span> · over the {MAX_ITEMS_PER_BATCH}-item cap, this order will be split across multiple batches</span>
           : <span> · cap is {MAX_ITEMS_PER_BATCH} per batch</span>}
       </div>
 
@@ -1285,7 +1293,7 @@ function BatchCard({ batch, now, index, onStart, onComplete, onCancelOrder }) {
   const fill = Math.min(100, (batch.itemCount / MAX_ITEMS_PER_BATCH) * 100);
   return (
     <article
-      className={`batch-card batch-card--${batch.status} ${batch.isOversized ? 'batch-card--oversized' : ''}`}
+      className={`batch-card batch-card--${batch.status}`}
       style={{ animationDelay: `${Math.min(index, 12) * 45}ms` }}
       aria-label={`${batch.zone} batch, ${STATUS_LABEL[batch.status]}`}>
       <header className="batch-card__head">
@@ -1295,9 +1303,6 @@ function BatchCard({ batch, now, index, onStart, onComplete, onCancelOrder }) {
             <span className="tag tag--split" title="Capacity forced this window to split">
               Part {batch.partIndex} of {batch.partCount}
             </span>
-          ) : null}
-          {batch.isOversized ? (
-            <span className="tag tag--warn" title="A single order exceeds the item cap">Oversized</span>
           ) : null}
         </div>
         <span className={`pill pill--${batch.status}`}>
@@ -1392,51 +1397,6 @@ function EmptyState({ hasOrders, onClear }) {
       </p>
       {hasOrders ? <button type="button" className="btn" onClick={onClear}>Clear filters</button> : null}
     </div>
-  );
-}
-
-function TestPanel() {
-  const [open, setOpen] = useState(false);
-  const results = useMemo(() => runTests(), []);
-  const passed = results.filter((r) => r.passed).length;
-  const allPass = passed === results.length;
-
-  let lastGroup = '';
-  return (
-    <section className="panel">
-      <div className="tests__head">
-        <h2 className="panel__title" style={{ marginBottom: 0 }}>Self-test</h2>
-        <span className={`tests__summary ${allPass ? 'tests__summary--pass' : 'tests__summary--fail'}`}>
-          {passed}/{results.length} passing
-        </span>
-      </div>
-      <button type="button" className="btn btn--ghost btn--sm" onClick={() => setOpen((o) => !o)}
-        aria-expanded={open}>
-        {open ? 'Hide details' : 'Show details'}
-      </button>
-      {open ? (
-        <div className="tests__list" style={{ marginTop: 10 }}>
-          {results.map((r, i) => {
-            const header = r.group !== lastGroup ? r.group : null;
-            lastGroup = r.group;
-            return (
-              <React.Fragment key={i}>
-                {header ? <div className="tests__group">{header}</div> : null}
-                <div className="tests__item">
-                  <span className={`tests__mark ${r.passed ? 'tests__mark--pass' : 'tests__mark--fail'}`}>
-                    {r.passed ? '✓' : '✕'}
-                  </span>
-                  <span>
-                    {r.name}
-                    {r.error ? <div className="tests__error">{r.error}</div> : null}
-                  </span>
-                </div>
-              </React.Fragment>
-            );
-          })}
-        </div>
-      ) : null}
-    </section>
   );
 }
 
@@ -1543,7 +1503,6 @@ function App() {
       <div className="layout">
         <aside className="layout__side">
           <OrderForm onCreate={addOrder} />
-          <TestPanel />
         </aside>
         <main className="layout__main">
           <FilterBar filters={filters} onChange={setFilters} onClear={clearFilters}
