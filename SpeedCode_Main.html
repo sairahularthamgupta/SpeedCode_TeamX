@@ -1,0 +1,1565 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Kitchen Dispatch — Capacity-Constrained Batching</title>
+<style>
+/* ---------- tokens ---------- */
+:root {
+  --z-north:#3b82f6; --z-south:#f59e0b; --z-east:#8b5cf6; --z-west:#14b8a6; --z-central:#f43f5e;
+  --radius:14px; --radius-sm:9px; --gap:16px;
+  --font: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  --ease: cubic-bezier(.2,.7,.3,1);
+}
+:root, [data-theme='light'] {
+  --bg:#f4f6fb; --bg-elev:#fff; --bg-sunken:#eef1f7;
+  --border:#dfe4ee; --border-strong:#c8d0e0;
+  --text:#131924; --text-dim:#5c6880; --text-faint:#8b95a9;
+  --accent:#2563eb; --accent-contrast:#fff;
+  --good:#059669; --warn:#d97706; --danger:#dc2626;
+  --shadow:0 1px 2px rgba(16,24,40,.05), 0 8px 24px rgba(16,24,40,.06);
+  --shadow-lift:0 2px 6px rgba(16,24,40,.08), 0 16px 36px rgba(16,24,40,.1);
+}
+[data-theme='dark'] {
+  --bg:#0c1016; --bg-elev:#141a23; --bg-sunken:#10151d;
+  --border:#232c39; --border-strong:#33404f;
+  --text:#e8edf5; --text-dim:#97a3b6; --text-faint:#6b7789;
+  --accent:#60a5fa; --accent-contrast:#07101f;
+  --good:#34d399; --warn:#fbbf24; --danger:#f87171;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
+  --shadow-lift:0 2px 6px rgba(0,0,0,.5), 0 18px 40px rgba(0,0,0,.45);
+}
+
+*,*::before,*::after { box-sizing:border-box; }
+body {
+  margin:0; font-family:var(--font); background:var(--bg); color:var(--text);
+  -webkit-font-smoothing:antialiased; transition:background .25s var(--ease), color .25s var(--ease);
+}
+h1,h2,h3,p,ul,fieldset,legend { margin:0; padding:0; }
+ul { list-style:none; }
+fieldset { border:0; }
+.app { max-width:1500px; margin:0 auto; padding:20px clamp(12px,3vw,28px) 56px; }
+
+/* ---------- header ---------- */
+.header {
+  display:flex; flex-wrap:wrap; gap:14px; align-items:center; justify-content:space-between;
+  padding:14px 18px; background:var(--bg-elev); border:1px solid var(--border);
+  border-radius:var(--radius); box-shadow:var(--shadow);
+}
+.header__brand { display:flex; gap:12px; align-items:center; }
+.header__logo {
+  display:grid; place-items:center; width:40px; height:40px; border-radius:11px;
+  color:var(--accent-contrast); background:linear-gradient(140deg,var(--accent),var(--z-east));
+}
+.header__title { font-size:1.12rem; font-weight:650; letter-spacing:-.01em; }
+.header__subtitle { font-size:.78rem; color:var(--text-dim); margin-top:2px; }
+.header__tools { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+.clock {
+  font-family:var(--mono); font-size:.82rem; color:var(--text-dim); padding:6px 10px;
+  background:var(--bg-sunken); border-radius:var(--radius-sm); font-variant-numeric:tabular-nums;
+}
+.live-dot { width:7px; height:7px; border-radius:50%; background:var(--text-faint); display:inline-block; }
+.live-dot--on { background:var(--good); animation:pulse 1.6s var(--ease) infinite; }
+
+/* ---------- buttons ---------- */
+.btn {
+  display:inline-flex; align-items:center; justify-content:center; gap:7px;
+  padding:8px 13px; font:inherit; font-size:.84rem; font-weight:550; color:var(--text);
+  background:var(--bg-elev); border:1px solid var(--border-strong); border-radius:var(--radius-sm);
+  cursor:pointer;
+  transition:transform .12s var(--ease), background .18s var(--ease), border-color .18s var(--ease);
+}
+.btn:hover:not(:disabled) { background:var(--bg-sunken); border-color:var(--text-faint); }
+.btn:active:not(:disabled) { transform:translateY(1px); }
+.btn:disabled { opacity:.45; cursor:not-allowed; }
+.btn:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+.btn--primary { background:var(--accent); border-color:var(--accent); color:var(--accent-contrast); }
+.btn--primary:hover:not(:disabled) { filter:brightness(1.08); }
+.btn--ghost { background:transparent; border-color:transparent; color:var(--text-dim); }
+.btn--ghost:hover:not(:disabled) { background:var(--bg-sunken); border-color:var(--border); }
+.btn--sm { padding:6px 10px; font-size:.79rem; }
+.btn--block { width:100%; }
+.btn--icon { padding:6px 9px; font-size:.95rem; line-height:1; }
+.btn--danger-ghost { color:var(--text-faint); border-color:transparent; background:transparent; }
+.btn--danger-ghost:hover:not(:disabled) {
+  color:var(--danger); background:color-mix(in srgb, var(--danger) 12%, transparent);
+}
+.btn--live { border-color:var(--good); color:var(--good); }
+
+/* ---------- stats ---------- */
+.stats { margin-top:var(--gap); display:grid; grid-template-columns:2fr 1fr; gap:var(--gap); }
+.stats__grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:var(--gap); }
+.stat {
+  padding:14px 16px; background:var(--bg-elev); border:1px solid var(--border);
+  border-left:3px solid var(--border-strong); border-radius:var(--radius);
+  box-shadow:var(--shadow); display:flex; flex-direction:column; gap:3px;
+}
+.stat--warn { border-left-color:var(--warn); }
+.stat--good { border-left-color:var(--good); }
+.stat__label {
+  font-size:.74rem; text-transform:uppercase; letter-spacing:.06em;
+  color:var(--text-faint); font-weight:600;
+}
+.stat__value { font-size:1.7rem; font-weight:680; letter-spacing:-.02em; font-variant-numeric:tabular-nums; }
+.stat__hint { font-size:.76rem; color:var(--text-dim); }
+.zone-bars {
+  padding:14px 16px; background:var(--bg-elev); border:1px solid var(--border);
+  border-radius:var(--radius); box-shadow:var(--shadow); display:flex; flex-direction:column; gap:9px;
+}
+.zone-bar__head { display:flex; align-items:center; gap:7px; font-size:.78rem; margin-bottom:4px; }
+.zone-bar__name { font-weight:560; }
+.zone-bar__count { margin-left:auto; color:var(--text-faint); font-variant-numeric:tabular-nums; }
+.zone-bar__track { height:6px; background:var(--bg-sunken); border-radius:99px; overflow:hidden; }
+.zone-bar__fill { height:100%; border-radius:99px; transition:width .5s var(--ease); }
+.zone-dot { width:9px; height:9px; border-radius:50%; display:inline-block; flex:0 0 auto; }
+.zone-dot--north,.zone-bar__fill--north { background:var(--z-north); }
+.zone-dot--south,.zone-bar__fill--south { background:var(--z-south); }
+.zone-dot--east,.zone-bar__fill--east { background:var(--z-east); }
+.zone-dot--west,.zone-bar__fill--west { background:var(--z-west); }
+.zone-dot--central,.zone-bar__fill--central { background:var(--z-central); }
+
+/* ---------- layout ---------- */
+.layout {
+  margin-top:var(--gap); display:grid; grid-template-columns:330px minmax(0,1fr);
+  gap:var(--gap); align-items:start;
+}
+.layout__side { position:sticky; top:16px; display:flex; flex-direction:column; gap:var(--gap); }
+
+/* ---------- panel / form ---------- */
+.panel {
+  background:var(--bg-elev); border:1px solid var(--border); border-radius:var(--radius);
+  box-shadow:var(--shadow); padding:18px;
+}
+.panel__title { font-size:.95rem; font-weight:640; margin-bottom:14px; }
+.order-form { display:flex; flex-direction:column; gap:13px; }
+.field { display:flex; flex-direction:column; gap:6px; }
+.field__label {
+  font-size:.76rem; font-weight:600; color:var(--text-dim);
+  text-transform:uppercase; letter-spacing:.05em;
+}
+.field__error { font-size:.76rem; color:var(--danger); }
+.field--items { gap:8px; }
+.input {
+  width:100%; padding:9px 11px; font:inherit; font-size:.87rem; color:var(--text);
+  background:var(--bg); border:1px solid var(--border-strong); border-radius:var(--radius-sm);
+  transition:border-color .18s var(--ease), box-shadow .18s var(--ease);
+}
+.input:focus {
+  outline:none; border-color:var(--accent);
+  box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.input--invalid { border-color:var(--danger); }
+.line { display:grid; grid-template-columns:1fr 72px auto; gap:6px; }
+.capacity-hint {
+  font-size:.79rem; color:var(--text-dim); padding:9px 11px; background:var(--bg-sunken);
+  border-radius:var(--radius-sm); border-left:3px solid var(--border-strong);
+  transition:border-color .2s var(--ease), color .2s var(--ease);
+}
+.capacity-hint--over { border-left-color:var(--warn); color:var(--warn); }
+.form-flash { min-height:18px; }
+.form-flash__msg { font-size:.78rem; color:var(--good); animation:fade-in .25s var(--ease); }
+
+/* ---------- filters ---------- */
+.filters {
+  background:var(--bg-elev); border:1px solid var(--border); border-radius:var(--radius);
+  box-shadow:var(--shadow); padding:14px 16px; display:flex; flex-direction:column; gap:11px;
+}
+.filters__search { position:relative; display:flex; align-items:center; }
+.filters__search svg { position:absolute; left:11px; color:var(--text-faint); pointer-events:none; }
+.input--search { padding-left:34px; }
+.chips { display:flex; flex-wrap:wrap; gap:6px; }
+.chip {
+  display:inline-flex; align-items:center; gap:6px; padding:5px 11px; font:inherit;
+  font-size:.79rem; font-weight:540; color:var(--text-dim); background:var(--bg-sunken);
+  border:1px solid transparent; border-radius:99px; cursor:pointer; transition:all .16s var(--ease);
+}
+.chip:hover { color:var(--text); border-color:var(--border-strong); }
+.chip--active { color:var(--accent-contrast); background:var(--accent); border-color:var(--accent); }
+.chip--status { text-transform:capitalize; }
+.chip:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+.filters__meta { display:flex; align-items:center; gap:10px; font-size:.78rem; color:var(--text-faint); }
+.filters__count { font-variant-numeric:tabular-nums; }
+
+/* ---------- zone sections ---------- */
+.zones { margin-top:var(--gap); display:flex; flex-direction:column; gap:22px; }
+.zone-section { animation:fade-in .3s var(--ease) both; }
+.zone-section__head {
+  display:flex; align-items:baseline; gap:10px; padding-bottom:8px;
+  margin-bottom:12px; border-bottom:1px solid var(--border);
+}
+.zone-section__title { display:flex; align-items:center; gap:8px; font-size:.95rem; font-weight:640; }
+.zone-section__meta {
+  font-size:.78rem; color:var(--text-faint); margin-left:auto; font-variant-numeric:tabular-nums;
+}
+.batch-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(320px,1fr)); gap:var(--gap); }
+
+/* ---------- batch card ---------- */
+.batch-card {
+  background:var(--bg-elev); border:1px solid var(--border); border-radius:var(--radius);
+  box-shadow:var(--shadow); padding:15px; display:flex; flex-direction:column; gap:11px;
+  animation:card-in .36s var(--ease) both;
+  transition:box-shadow .22s var(--ease), transform .22s var(--ease), border-color .22s var(--ease);
+}
+.batch-card:hover { box-shadow:var(--shadow-lift); transform:translateY(-2px); }
+.batch-card--completed { opacity:.72; }
+.batch-card--oversized { border-color:color-mix(in srgb, var(--warn) 55%, var(--border)); }
+.batch-card__head { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.batch-card__title { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+.zone-badge {
+  font-size:.76rem; font-weight:650; padding:3px 9px; border-radius:99px;
+  color:#fff; letter-spacing:.01em;
+}
+.zone-badge--north { background:var(--z-north); }
+.zone-badge--south { background:var(--z-south); color:#24170a; }
+.zone-badge--east { background:var(--z-east); }
+.zone-badge--west { background:var(--z-west); color:#04211d; }
+.zone-badge--central { background:var(--z-central); }
+.tag {
+  font-size:.7rem; font-weight:600; padding:3px 8px; border-radius:99px;
+  background:var(--bg-sunken); color:var(--text-dim); border:1px solid var(--border);
+}
+.tag--split {
+  color:var(--accent); border-color:color-mix(in srgb, var(--accent) 40%, transparent);
+  background:color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.tag--warn {
+  color:var(--warn); border-color:color-mix(in srgb, var(--warn) 45%, transparent);
+  background:color-mix(in srgb, var(--warn) 13%, transparent);
+}
+.pill {
+  display:inline-flex; align-items:center; gap:6px; font-size:.72rem; font-weight:620;
+  padding:4px 10px; border-radius:99px; text-transform:capitalize; white-space:nowrap;
+}
+.pill__dot { width:6px; height:6px; border-radius:50%; background:currentColor; }
+.pill--collecting { color:var(--accent); background:color-mix(in srgb, var(--accent) 14%, transparent); }
+.pill--collecting .pill__dot { animation:pulse 1.6s var(--ease) infinite; }
+.pill--ready { color:var(--warn); background:color-mix(in srgb, var(--warn) 15%, transparent); }
+.pill--preparing { color:var(--z-east); background:color-mix(in srgb, var(--z-east) 15%, transparent); }
+.pill--completed { color:var(--good); background:color-mix(in srgb, var(--good) 15%, transparent); }
+.batch-card__window {
+  display:flex; align-items:center; gap:8px; font-size:.78rem;
+  color:var(--text-dim); font-variant-numeric:tabular-nums;
+}
+.batch-card__countdown { margin-left:auto; color:var(--accent); font-weight:560; font-family:var(--mono); }
+
+/* ---------- capacity meter ---------- */
+.meter { display:flex; align-items:center; gap:9px; }
+.meter__track { flex:1; height:7px; background:var(--bg-sunken); border-radius:99px; overflow:hidden; }
+.meter__fill {
+  height:100%; border-radius:99px; background:linear-gradient(90deg,var(--accent),var(--z-east));
+  transition:width .45s var(--ease);
+}
+.meter__fill--full { background:linear-gradient(90deg,var(--warn),var(--z-central)); }
+.meter__label { font-size:.74rem; color:var(--text-dim); font-variant-numeric:tabular-nums; white-space:nowrap; }
+
+/* ---------- order rows ---------- */
+.order-list { display:flex; flex-direction:column; gap:6px; }
+.order-row {
+  display:grid; grid-template-columns:minmax(0,1fr) auto;
+  grid-template-areas:'main side' 'items side'; gap:2px 10px; padding:8px 10px;
+  background:var(--bg-sunken); border-radius:var(--radius-sm); border-left:2px solid transparent;
+  transition:border-color .2s var(--ease), opacity .2s var(--ease);
+  animation:fade-in .25s var(--ease) both;
+}
+.order-row--preparing { border-left-color:var(--z-east); }
+.order-row--completed { border-left-color:var(--good); opacity:.6; }
+.order-row__main { grid-area:main; display:flex; align-items:baseline; gap:7px; min-width:0; }
+.order-row__customer {
+  font-size:.83rem; font-weight:570; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+.order-row__id { font-family:var(--mono); font-size:.68rem; color:var(--text-faint); white-space:nowrap; }
+.order-row__items {
+  grid-area:items; display:flex; flex-wrap:wrap; gap:5px; font-size:.74rem; color:var(--text-dim);
+}
+.order-row__item { display:inline-flex; gap:3px; }
+.order-row__qty { color:var(--text-faint); font-variant-numeric:tabular-nums; }
+.order-row__side {
+  grid-area:side; display:flex; align-items:center; gap:8px;
+  font-size:.72rem; color:var(--text-faint); white-space:nowrap;
+}
+.order-row__count { font-variant-numeric:tabular-nums; }
+
+/* ---------- card footer ---------- */
+.batch-card__foot {
+  display:flex; align-items:center; justify-content:space-between; gap:8px;
+  padding-top:10px; border-top:1px solid var(--border);
+}
+.batch-card__summary { font-size:.78rem; color:var(--text-faint); }
+.done-mark { font-size:.8rem; font-weight:600; color:var(--good); }
+
+/* ---------- states ---------- */
+.state { margin-top:var(--gap); }
+.state--center {
+  display:flex; flex-direction:column; align-items:center; gap:10px; text-align:center;
+  padding:56px 24px; background:var(--bg-elev); border:1px dashed var(--border-strong);
+  border-radius:var(--radius); animation:fade-in .3s var(--ease);
+}
+.state__icon {
+  display:grid; place-items:center; width:52px; height:52px; border-radius:50%;
+  background:var(--bg-sunken); color:var(--text-dim);
+}
+.state__icon--error { color:var(--danger); background:color-mix(in srgb, var(--danger) 12%, transparent); }
+.state__title { font-size:1.02rem; font-weight:640; }
+.state__caption { font-size:.85rem; color:var(--text-dim); max-width:46ch; }
+.state__caption--loading { margin-top:14px; text-align:center; }
+.skeleton-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(320px,1fr)); gap:var(--gap); }
+.skeleton-card {
+  background:var(--bg-elev); border:1px solid var(--border); border-radius:var(--radius);
+  padding:15px; display:flex; flex-direction:column; gap:11px; animation:fade-in .3s var(--ease) both;
+}
+.skeleton-line {
+  height:12px; border-radius:6px;
+  background:linear-gradient(90deg, var(--bg-sunken) 25%,
+    color-mix(in srgb, var(--border-strong) 55%, var(--bg-sunken)) 37%, var(--bg-sunken) 63%);
+  background-size:400% 100%; animation:shimmer 1.4s ease-in-out infinite;
+}
+.skeleton-line--title { width:45%; height:18px; }
+.skeleton-line--meter { height:7px; }
+.skeleton-line--short { width:65%; }
+
+/* ---------- animations ---------- */
+@keyframes card-in { from { opacity:0; transform:translateY(10px) scale(.985); } to { opacity:1; transform:none; } }
+@keyframes fade-in { from { opacity:0; } to { opacity:1; } }
+@keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:.35; } }
+@keyframes shimmer { from { background-position:100% 50%; } to { background-position:0 50%; } }
+@media (prefers-reduced-motion: reduce) {
+  *,*::before,*::after {
+    animation-duration:.001ms !important; animation-iteration-count:1 !important;
+    transition-duration:.001ms !important;
+  }
+}
+
+/* ---------- responsive ---------- */
+@media (max-width:1080px) {
+  .stats { grid-template-columns:1fr; }
+  .layout { grid-template-columns:1fr; }
+  .layout__side { position:static; }
+}
+@media (max-width:620px) {
+  .app { padding:12px 12px 40px; }
+  .header { flex-direction:column; align-items:stretch; }
+  .header__tools { justify-content:space-between; }
+  .batch-grid,.skeleton-grid { grid-template-columns:1fr; }
+  .stat__value { font-size:1.4rem; }
+  .order-row { grid-template-columns:1fr; grid-template-areas:'main' 'items' 'side'; }
+  .order-row__side { justify-content:flex-start; }
+}
+
+/* ---------- boot fallback ---------- */
+.boot {
+  max-width:640px; margin:80px auto; padding:24px; text-align:center;
+  font-family:var(--font); color:var(--text-dim);
+}
+</style>
+</head>
+<body>
+<div id="root">
+  <div class="boot">
+    <h1 style="font-size:1.1rem;color:var(--text)">Kitchen Dispatch</h1>
+    <p style="margin-top:10px">
+      Loading React from the CDN and compiling TypeScript in the browser…<br />
+      If this message persists, check your internet connection — this page pulls
+      React and Babel from unpkg.
+    </p>
+  </div>
+</div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone@7.25.6/babel.min.js" crossorigin></script>
+
+<script>
+  // Babel's TypeScript preset needs isTSX/allExtensions to parse JSX inside an
+  // inline script, where there is no filename to infer the dialect from.
+  Babel.registerPreset('tsx', {
+    presets: [[Babel.availablePresets['typescript'], { isTSX: true, allExtensions: true }]],
+  });
+</script>
+
+<script type="text/babel" data-presets="react,tsx">
+/* ============================================================================
+   DOMAIN TYPES
+   ========================================================================== */
+
+const ZONES = ['North', 'South', 'East', 'West', 'Central'] as const;
+type Zone = (typeof ZONES)[number];
+
+interface OrderItem { name: string; quantity: number; }
+type OrderStatus = 'pending' | 'preparing' | 'completed' | 'cancelled';
+
+interface Order {
+  id: string;
+  customer: string;
+  zone: Zone;
+  items: OrderItem[];
+  createdAt: number;
+  status: OrderStatus;
+}
+
+type BatchStatus = 'collecting' | 'ready' | 'preparing' | 'completed';
+
+interface Batch {
+  id: string;
+  zone: Zone;
+  orders: Order[];
+  itemCount: number;
+  windowStart: number;
+  windowEnd: number;
+  partIndex: number;
+  partCount: number;
+  isSplit: boolean;
+  isOversized: boolean;
+  status: BatchStatus;
+}
+
+interface ZoneStats { orders: number; batches: number; items: number; }
+
+interface Stats {
+  totalOrders: number;
+  activeOrders: number;
+  completedOrders: number;
+  totalBatches: number;
+  splitBatches: number;
+  totalItems: number;
+  avgItemsPerBatch: number;
+  avgOrdersPerBatch: number;
+  capacityUtilization: number;
+  byZone: Record<Zone, ZoneStats>;
+}
+
+/* ============================================================================
+   BATCHING ALGORITHM  (pure — this is what the self-tests exercise)
+   ========================================================================== */
+
+const BATCH_WINDOW_MS = 5 * 60 * 1000;
+const MAX_ITEMS_PER_BATCH = 5;
+
+interface BatchOptions { windowMs?: number; maxItems?: number; now?: number; }
+
+/** Total physical items in an order: quantities summed, not a line count. */
+function countItems(order: Order): number {
+  return order.items.reduce((sum, item) => sum + item.quantity, 0);
+}
+
+/**
+ * Split a zone's orders into windows. The first order anchors a window and every
+ * later order within `windowMs` of that anchor joins it. Windows are half-open —
+ * [anchor, anchor + windowMs) — so an order landing exactly on the boundary opens
+ * the next one.
+ *
+ * The anchor deliberately does not slide: a steady trickle of orders would
+ * otherwise hold a batch open forever.
+ */
+function partitionByWindow(sorted: Order[], windowMs: number): Order[][] {
+  const windows: Order[][] = [];
+  let current: Order[] = [];
+  let anchor = 0;
+
+  for (const order of sorted) {
+    if (current.length === 0) {
+      anchor = order.createdAt;
+      current = [order];
+      continue;
+    }
+    if (order.createdAt - anchor < windowMs) {
+      current.push(order);
+    } else {
+      windows.push(current);
+      anchor = order.createdAt;
+      current = [order];
+    }
+  }
+  if (current.length > 0) windows.push(current);
+  return windows;
+}
+
+/**
+ * Pack a window's orders into chunks that respect the item cap. Orders are never
+ * torn apart: one that alone exceeds the cap gets its own chunk rather than
+ * splitting a customer's food across two runs.
+ */
+function splitByCapacity(orders: Order[], maxItems: number): Order[][] {
+  const chunks: Order[][] = [];
+  let current: Order[] = [];
+  let currentItems = 0;
+
+  for (const order of orders) {
+    const items = countItems(order);
+
+    if (items > maxItems) {
+      if (current.length > 0) { chunks.push(current); current = []; currentItems = 0; }
+      chunks.push([order]);
+      continue;
+    }
+    if (current.length > 0 && currentItems + items > maxItems) {
+      chunks.push(current); current = []; currentItems = 0;
+    }
+    current.push(order);
+    currentItems += items;
+  }
+  if (current.length > 0) chunks.push(current);
+  return chunks;
+}
+
+function deriveStatus(orders: Order[], windowEnd: number, now: number): BatchStatus {
+  if (orders.every((o) => o.status === 'completed')) return 'completed';
+  if (orders.some((o) => o.status === 'preparing')) return 'preparing';
+  return now < windowEnd ? 'collecting' : 'ready';
+}
+
+function batchOrders(orders: Order[], options: BatchOptions = {}): Batch[] {
+  const windowMs = options.windowMs ?? BATCH_WINDOW_MS;
+  const maxItems = options.maxItems ?? MAX_ITEMS_PER_BATCH;
+  const now = options.now ?? Date.now();
+
+  if (windowMs <= 0) throw new RangeError('windowMs must be greater than 0');
+  if (maxItems <= 0) throw new RangeError('maxItems must be greater than 0');
+
+  const byZone = new Map<Zone, Order[]>();
+  for (const order of orders) {
+    if (order.status === 'cancelled') continue;
+    const bucket = byZone.get(order.zone);
+    if (bucket) bucket.push(order);
+    else byZone.set(order.zone, [order]);
+  }
+
+  const batches: Batch[] = [];
+
+  byZone.forEach((zoneOrders, zone) => {
+    const sorted = [...zoneOrders].sort(
+      (a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id),
+    );
+
+    for (const windowOrders of partitionByWindow(sorted, windowMs)) {
+      const windowStart = windowOrders[0].createdAt;
+      const windowEnd = windowStart + windowMs;
+      const chunks = splitByCapacity(windowOrders, maxItems);
+
+      chunks.forEach((chunk, index) => {
+        const itemCount = chunk.reduce((sum, o) => sum + countItems(o), 0);
+        batches.push({
+          id: `${zone}-${windowStart}-${index + 1}`,
+          zone,
+          orders: chunk,
+          itemCount,
+          windowStart,
+          windowEnd,
+          partIndex: index + 1,
+          partCount: chunks.length,
+          isSplit: chunks.length > 1,
+          isOversized: itemCount > maxItems,
+          status: deriveStatus(chunk, windowEnd, now),
+        });
+      });
+    }
+  });
+
+  return batches.sort(
+    (a, b) =>
+      a.windowStart - b.windowStart ||
+      a.zone.localeCompare(b.zone) ||
+      a.partIndex - b.partIndex,
+  );
+}
+
+function computeStats(orders: Order[], batches: Batch[], maxItems = MAX_ITEMS_PER_BATCH): Stats {
+  const byZone = {} as Record<Zone, ZoneStats>;
+  ZONES.forEach((zone) => { byZone[zone] = { orders: 0, batches: 0, items: 0 }; });
+
+  let totalItems = 0;
+  for (const batch of batches) {
+    const zone = byZone[batch.zone];
+    zone.batches += 1;
+    zone.orders += batch.orders.length;
+    zone.items += batch.itemCount;
+    totalItems += batch.itemCount;
+  }
+
+  const activeOrders = orders.filter((o) => o.status === 'pending' || o.status === 'preparing').length;
+  const completedOrders = orders.filter((o) => o.status === 'completed').length;
+  const batchedOrders = batches.reduce((sum, b) => sum + b.orders.length, 0);
+
+  const utilization =
+    batches.length === 0
+      ? 0
+      : (batches.reduce((sum, b) => sum + Math.min(b.itemCount / maxItems, 1), 0) / batches.length) * 100;
+
+  return {
+    totalOrders: orders.length,
+    activeOrders,
+    completedOrders,
+    totalBatches: batches.length,
+    splitBatches: batches.filter((b) => b.isSplit).length,
+    totalItems,
+    avgItemsPerBatch: batches.length === 0 ? 0 : totalItems / batches.length,
+    avgOrdersPerBatch: batches.length === 0 ? 0 : batchedOrders / batches.length,
+    capacityUtilization: utilization,
+    byZone,
+  };
+}
+
+/* ============================================================================
+   FILTERING  (also pure, also tested)
+   ========================================================================== */
+
+type ZoneFilter = Zone | 'all';
+type StatusFilter = BatchStatus | 'all';
+interface BatchFilters { search: string; zone: ZoneFilter; status: StatusFilter; }
+
+const NO_FILTERS: BatchFilters = { search: '', zone: 'all', status: 'all' };
+
+function isFilterActive(f: BatchFilters): boolean {
+  return f.search.trim() !== '' || f.zone !== 'all' || f.status !== 'all';
+}
+
+function batchMatchesQuery(batch: Batch, rawQuery: string): boolean {
+  const query = rawQuery.trim().toLowerCase();
+  if (query === '') return true;
+  if (batch.zone.toLowerCase().includes(query)) return true;
+  return batch.orders.some(
+    (order) =>
+      order.customer.toLowerCase().includes(query) ||
+      order.id.toLowerCase().includes(query) ||
+      order.items.some((item) => item.name.toLowerCase().includes(query)),
+  );
+}
+
+/**
+ * Matched batches are kept whole. Hiding the non-matching orders inside a batch
+ * would misrepresent its capacity, which is the thing the board exists to show.
+ */
+function filterBatches(batches: Batch[], filters: BatchFilters): Batch[] {
+  return batches.filter((batch) => {
+    if (filters.zone !== 'all' && batch.zone !== filters.zone) return false;
+    if (filters.status !== 'all' && batch.status !== filters.status) return false;
+    return batchMatchesQuery(batch, filters.search);
+  });
+}
+
+function groupBatchesByZone(batches: Batch[], zoneOrder: readonly Zone[]): [Zone, Batch[]][] {
+  const grouped = new Map<Zone, Batch[]>();
+  for (const batch of batches) {
+    const bucket = grouped.get(batch.zone);
+    if (bucket) bucket.push(batch);
+    else grouped.set(batch.zone, [batch]);
+  }
+  return zoneOrder
+    .filter((zone) => grouped.has(zone))
+    .map((zone) => [zone, grouped.get(zone) as Batch[]] as [Zone, Batch[]]);
+}
+
+/* ============================================================================
+   FORMATTING
+   ========================================================================== */
+
+const formatClock = (ts: number) =>
+  new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+const formatClockWithSeconds = (ts: number) =>
+  new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+function formatCountdown(target: number, now: number): string {
+  const totalSeconds = Math.ceil(Math.max(0, target - now) / 1000);
+  return `${Math.floor(totalSeconds / 60)}:${String(totalSeconds % 60).padStart(2, '0')}`;
+}
+
+function formatRelative(ts: number, now: number): string {
+  const seconds = Math.max(0, Math.round((now - ts) / 1000));
+  if (seconds < 10) return 'just now';
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  return `${Math.floor(minutes / 60)}h ago`;
+}
+
+const pluralize = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+const roundTo = (v: number, d = 1) => Math.round(v * 10 ** d) / 10 ** d;
+
+/* ============================================================================
+   SIMULATED DATA SOURCE
+   ========================================================================== */
+
+const CUSTOMERS = [
+  'Ava Reyes','Ben Okafor','Chloe Tan','Diego Marín','Ella Novak',
+  'Finn Walsh','Grace Lim','Hugo Bauer','Iris Kaur','Jonas Berg',
+  'Kira Sato','Liam Doyle','Maya Haddad','Noah Petrov','Olive Byrne',
+];
+const MENU = [
+  'Smash Burger','Truffle Fries','Katsu Curry','Pad Thai','Margherita',
+  'Falafel Wrap','Ramen Shoyu','Caesar Salad','Bibimbap','Fish Tacos',
+  'Mango Lassi','Cold Brew',
+];
+
+let idCounter = 1000;
+const nextId = () => `ORD-${(idCounter += 1)}`;
+function pick<T>(list: readonly T[]): T { return list[Math.floor(Math.random() * list.length)]; }
+
+function randomItems(): OrderItem[] {
+  const lines = 1 + Math.floor(Math.random() * 2);
+  const seen = new Set<string>();
+  const items: OrderItem[] = [];
+  for (let i = 0; i < lines; i += 1) {
+    const name = pick(MENU);
+    if (seen.has(name)) continue;
+    seen.add(name);
+    items.push({ name, quantity: 1 + Math.floor(Math.random() * 3) });
+  }
+  return items;
+}
+
+function randomOrder(at: number = Date.now()): Order {
+  return { id: nextId(), customer: pick(CUSTOMERS), zone: pick(ZONES), items: randomItems(), createdAt: at, status: 'pending' };
+}
+
+/**
+ * A starting board that exercises the interesting paths: a zone that overflows
+ * capacity and splits, a zone spanning two windows, and one oversized order.
+ */
+function seedOrders(now: number = Date.now()): Order[] {
+  const min = 60 * 1000;
+  const make = (zone: Zone, customer: string, minutesAgo: number, items: OrderItem[]): Order => ({
+    id: nextId(), customer, zone, items, createdAt: now - minutesAgo * min, status: 'pending',
+  });
+
+  return [
+    // North: 7 items in one window -> splits into two batches.
+    make('North', 'Ava Reyes', 3.5, [{ name: 'Smash Burger', quantity: 2 }]),
+    make('North', 'Ben Okafor', 2.8, [{ name: 'Truffle Fries', quantity: 2 }, { name: 'Cold Brew', quantity: 1 }]),
+    make('North', 'Chloe Tan', 1.2, [{ name: 'Katsu Curry', quantity: 2 }]),
+    // South: two separate windows, ~9 minutes apart.
+    make('South', 'Diego Marín', 11, [{ name: 'Pad Thai', quantity: 3 }]),
+    make('South', 'Ella Novak', 1.6, [{ name: 'Margherita', quantity: 2 }]),
+    // East: a single order over the cap -> isolated and flagged.
+    make('East', 'Finn Walsh', 2.2, [{ name: 'Falafel Wrap', quantity: 4 }, { name: 'Mango Lassi', quantity: 3 }]),
+    // Central: comfortably inside one batch.
+    make('Central', 'Grace Lim', 0.7, [{ name: 'Ramen Shoyu', quantity: 1 }]),
+    make('Central', 'Hugo Bauer', 0.3, [{ name: 'Caesar Salad', quantity: 2 }]),
+  ];
+}
+
+function fetchOrders(options: { fail?: boolean; delayMs?: number } = {}): Promise<Order[]> {
+  const { fail = false, delayMs = 850 } = options;
+  return new Promise((resolve, reject) => {
+    setTimeout(() => {
+      if (fail) reject(new Error('Could not reach the order service (HTTP 503).'));
+      else resolve(seedOrders());
+    }, delayMs);
+  });
+}
+
+/* ============================================================================
+   UNIT TESTS  —  run in-page, results rendered in the Self-test panel
+   ========================================================================== */
+
+interface TestResult { group: string; name: string; passed: boolean; error?: string; }
+
+function runTests(): TestResult[] {
+  const results: TestResult[] = [];
+  let group = '';
+
+  const describe = (name: string, fn: () => void) => { group = name; fn(); };
+  const it = (name: string, fn: () => void) => {
+    try { fn(); results.push({ group, name, passed: true }); }
+    catch (err) { results.push({ group, name, passed: false, error: (err as Error).message }); }
+  };
+
+  const eq = (actual: unknown, expected: unknown, label = '') => {
+    const a = JSON.stringify(actual);
+    const e = JSON.stringify(expected);
+    if (a !== e) throw new Error(`${label}expected ${e}, got ${a}`);
+  };
+  const ok = (value: boolean, label: string) => { if (!value) throw new Error(label); };
+
+  const T0 = new Date('2026-01-01T12:00:00.000Z').getTime();
+  const MIN = 60 * 1000;
+  const SETTLED = { now: T0 + 60 * MIN };
+  let n = 0;
+  const mk = (o: Partial<{ id: string; zone: Zone; items: number; at: number; status: OrderStatus }> = {}): Order => {
+    n += 1;
+    return {
+      id: o.id ?? `o${n}`,
+      customer: `Customer ${n}`,
+      zone: o.zone ?? 'North',
+      items: [{ name: 'Burger', quantity: o.items ?? 1 }],
+      createdAt: o.at ?? T0,
+      status: o.status ?? 'pending',
+    };
+  };
+
+  describe('countItems', () => {
+    it('sums quantities rather than counting lines', () => {
+      const o = { ...mk(), items: [{ name: 'Fries', quantity: 2 }, { name: 'Shake', quantity: 3 }] };
+      eq(countItems(o), 5);
+    });
+    it('returns 0 for an order with no items', () => eq(countItems({ ...mk(), items: [] }), 0));
+  });
+
+  describe('time window', () => {
+    it('keeps orders inside the window together', () => {
+      const b = batchOrders([mk({ at: T0 }), mk({ at: T0 + 2 * MIN }), mk({ at: T0 + 4 * MIN })], SETTLED);
+      eq(b.length, 1);
+    });
+    it('treats the window as half-open: exactly 5 min opens a new window', () => {
+      eq(batchOrders([mk({ at: T0 }), mk({ at: T0 + BATCH_WINDOW_MS })], SETTLED).length, 2);
+    });
+    it('anchors on the first order, so windows do not slide', () => {
+      // 8 min is only 4 min after its predecessor, but 8 min after the anchor.
+      const b = batchOrders([mk({ at: T0 }), mk({ at: T0 + 4 * MIN }), mk({ at: T0 + 8 * MIN })], SETTLED);
+      eq(b.length, 2);
+      eq(b[0].orders.length, 2);
+    });
+    it('a new window is not reported as a capacity split', () => {
+      const b = batchOrders([mk({ at: T0 }), mk({ at: T0 + 6 * MIN })], SETTLED);
+      ok(b.every((x) => !x.isSplit), 'expected no split flags');
+    });
+  });
+
+  describe('zone grouping', () => {
+    it('never mixes zones in one batch', () => {
+      const b = batchOrders(
+        [mk({ zone: 'North', at: T0 }), mk({ zone: 'South', at: T0 }), mk({ zone: 'North', at: T0 + MIN })],
+        SETTLED,
+      );
+      eq(b.length, 2);
+      ok(b.every((x) => new Set(x.orders.map((o) => o.zone)).size === 1), 'zones mixed');
+    });
+    it('groups in canonical zone order', () => {
+      const b = batchOrders(seedOrders(T0), SETTLED);
+      const zones = groupBatchesByZone(b, ZONES).map(([z]) => z);
+      eq(zones, ZONES.filter((z) => zones.includes(z)));
+    });
+  });
+
+  describe('capacity splitting', () => {
+    it('fits exactly the cap into a single batch', () => {
+      const b = batchOrders([mk({ items: 2, at: T0 }), mk({ items: 3, at: T0 + MIN })], SETTLED);
+      eq(b.length, 1);
+      eq(b[0].itemCount, MAX_ITEMS_PER_BATCH);
+      eq(b[0].isSplit, false);
+    });
+    it('splits into a second batch for the same zone when over the cap', () => {
+      const b = batchOrders([mk({ items: 3, at: T0 }), mk({ items: 3, at: T0 + MIN })], SETTLED);
+      eq(b.length, 2);
+      eq(b[0].windowStart, b[1].windowStart, 'same window: ');
+      eq(b.map((x) => x.partIndex), [1, 2]);
+      ok(b.every((x) => x.partCount === 2 && x.isSplit), 'split flags missing');
+      ok(b.every((x) => x.itemCount <= MAX_ITEMS_PER_BATCH), 'cap exceeded');
+    });
+    it('splits into as many batches as capacity requires', () => {
+      const orders = Array.from({ length: 12 }, (_, i) => mk({ items: 1, at: T0 + i * 1000 }));
+      const b = batchOrders(orders, SETTLED);
+      eq(b.map((x) => x.itemCount), [5, 5, 2]);
+      eq(b.flatMap((x) => x.orders).length, 12, 'no order lost: ');
+    });
+    it('flags an order larger than the cap instead of dropping it', () => {
+      const b = batchOrders([mk({ items: 8, at: T0 })], SETTLED);
+      eq(b.length, 1);
+      eq(b[0].isOversized, true);
+      eq(b[0].itemCount, 8);
+    });
+    it('flushes the in-progress batch before isolating an oversized order', () => {
+      const b = batchOrders(
+        [mk({ items: 2, at: T0 }), mk({ items: 9, at: T0 + 1000 }), mk({ items: 1, at: T0 + 2000 })],
+        SETTLED,
+      );
+      eq(b.map((x) => x.itemCount), [2, 9, 1]);
+    });
+  });
+
+  describe('correctness guarantees', () => {
+    it('excludes cancelled orders from capacity', () => {
+      const b = batchOrders([mk({ items: 3, at: T0 }), mk({ items: 3, at: T0 + MIN, status: 'cancelled' })], SETTLED);
+      eq(b.length, 1);
+      eq(b[0].itemCount, 3);
+    });
+    it('is deterministic regardless of input order', () => {
+      const orders = [mk({ zone: 'West', items: 2, at: T0 + 2 * MIN }), mk({ zone: 'East', items: 4, at: T0 }), mk({ zone: 'West', items: 4, at: T0 + MIN })];
+      eq(batchOrders(orders, SETTLED).map((b) => b.id), batchOrders([...orders].reverse(), SETTLED).map((b) => b.id));
+    });
+    it('does not mutate its input', () => {
+      const orders = [mk({ at: T0 + MIN }), mk({ at: T0 })];
+      const snapshot = JSON.parse(JSON.stringify(orders));
+      batchOrders(orders, SETTLED);
+      eq(orders, snapshot);
+    });
+    it('returns nothing for no orders', () => eq(batchOrders([]), []));
+    it('rejects nonsensical options', () => {
+      let threw = 0;
+      try { batchOrders([], { windowMs: 0 }); } catch { threw += 1; }
+      try { batchOrders([], { maxItems: 0 }); } catch { threw += 1; }
+      eq(threw, 2);
+    });
+  });
+
+  describe('batch status', () => {
+    it('is collecting while the window is open', () =>
+      eq(batchOrders([mk({ at: T0 })], { now: T0 + MIN })[0].status, 'collecting'));
+    it('becomes ready once the window closes', () =>
+      eq(batchOrders([mk({ at: T0 })], { now: T0 + 6 * MIN })[0].status, 'ready'));
+    it('reports preparing when any order is in progress', () =>
+      eq(batchOrders([mk({ at: T0, status: 'preparing' }), mk({ at: T0 + MIN })], SETTLED)[0].status, 'preparing'));
+    it('reports completed only when every order is done', () => {
+      eq(batchOrders([mk({ at: T0, status: 'completed' }), mk({ at: T0 + MIN, status: 'completed' })], SETTLED)[0].status, 'completed');
+      eq(batchOrders([mk({ at: T0, status: 'completed' }), mk({ at: T0 + MIN })], SETTLED)[0].status, 'ready');
+    });
+  });
+
+  describe('filters and search', () => {
+    const base = batchOrders([mk({ zone: 'North', at: T0, id: 'ORD-1' }), mk({ zone: 'South', at: T0, id: 'ORD-2', status: 'completed' })], SETTLED);
+    it('default filters are inactive, whitespace search included', () => {
+      eq(isFilterActive(NO_FILTERS), false);
+      eq(isFilterActive({ ...NO_FILTERS, search: '   ' }), false);
+    });
+    it('narrows by zone and by status', () => {
+      eq(filterBatches(base, { ...NO_FILTERS, zone: 'South' }).length, 1);
+      eq(filterBatches(base, { ...NO_FILTERS, status: 'completed' }).length, 1);
+    });
+    it('combines filters conjunctively', () =>
+      eq(filterBatches(base, { ...NO_FILTERS, zone: 'North', status: 'completed' }).length, 0));
+    it('searches id, customer, dish and zone case-insensitively', () => {
+      const b = base[0];
+      ok(batchMatchesQuery(b, 'ORD-1') && batchMatchesQuery(b, 'burger') && batchMatchesQuery(b, 'NORTH'), 'search miss');
+      eq(batchMatchesQuery(b, 'zzzz'), false);
+    });
+    it('keeps matched batches whole so capacity stays truthful', () => {
+      const crowded = batchOrders(
+        [{ ...mk({ at: T0 }), id: 'A', customer: 'Zoe', items: [{ name: 'Ramen', quantity: 2 }] },
+         { ...mk({ at: T0 }), id: 'B', customer: 'Yuri', items: [{ name: 'Ramen', quantity: 2 }] }],
+        SETTLED,
+      );
+      const res = filterBatches(crowded, { ...NO_FILTERS, search: 'Zoe' });
+      eq(res.length, 1);
+      eq(res[0].orders.length, 2, 'non-matching order dropped: ');
+      eq(res[0].itemCount, 4);
+    });
+  });
+
+  describe('statistics', () => {
+    it('reports zeros for an empty board', () => {
+      const s = computeStats([], []);
+      eq([s.totalBatches, s.avgItemsPerBatch, s.capacityUtilization], [0, 0, 0]);
+    });
+    it('aggregates orders, batches and per-zone totals', () => {
+      const orders = [mk({ zone: 'North', items: 3, at: T0 }), mk({ zone: 'North', items: 3, at: T0 + MIN }), mk({ zone: 'South', items: 2, at: T0, status: 'completed' })];
+      const s = computeStats(orders, batchOrders(orders, SETTLED));
+      eq([s.totalOrders, s.activeOrders, s.completedOrders], [3, 2, 1]);
+      eq([s.totalBatches, s.splitBatches, s.totalItems], [3, 2, 8]);
+      eq(s.byZone.North, { orders: 2, batches: 2, items: 6 });
+      eq(s.byZone.West, { orders: 0, batches: 0, items: 0 });
+    });
+    it('caps utilization at 100% even when a batch is oversized', () => {
+      const orders = [mk({ items: 20, at: T0 })];
+      eq(computeStats(orders, batchOrders(orders, SETTLED)).capacityUtilization, 100);
+    });
+  });
+
+  describe('seed data', () => {
+    it('demonstrates a split, a second window and an oversized order', () => {
+      const b = batchOrders(seedOrders(T0), SETTLED);
+      ok(b.some((x) => x.isSplit), 'no split in seed data');
+      ok(b.some((x) => x.isOversized), 'no oversized batch in seed data');
+      eq(new Set(b.filter((x) => x.zone === 'South').map((x) => x.windowStart)).size, 2);
+    });
+  });
+
+  return results;
+}
+
+/* ============================================================================
+   HOOKS
+   ========================================================================== */
+
+const { useState, useEffect, useMemo, useCallback } = React;
+
+/** Batch windows close on their own, so the board needs a ticking time source. */
+function useNow(intervalMs = 1000): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), intervalMs);
+    return () => window.clearInterval(id);
+  }, [intervalMs]);
+  return now;
+}
+
+type Theme = 'light' | 'dark';
+const THEME_KEY = 'kitchen-batching:theme';
+
+function useTheme() {
+  // Opened from file://, storage access can throw outright, so every touch of it
+  // is guarded — a blocked preference must not stop the board from rendering.
+  const [theme, setTheme] = useState<Theme>(() => {
+    try {
+      const stored = window.localStorage.getItem(THEME_KEY);
+      if (stored === 'light' || stored === 'dark') return stored;
+    } catch { /* storage unavailable */ }
+    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  });
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    try {
+      window.localStorage.setItem(THEME_KEY, theme);
+    } catch { /* storage unavailable */ }
+  }, [theme]);
+  const toggleTheme = useCallback(() => setTheme((c) => (c === 'dark' ? 'light' : 'dark')), []);
+  return { theme, toggleTheme };
+}
+
+/* ============================================================================
+   COMPONENTS
+   ========================================================================== */
+
+function Header({ theme, onToggleTheme, simulating, onToggleSimulation, onReload, onForceError, now }) {
+  return (
+    <header className="header">
+      <div className="header__brand">
+        <div className="header__logo" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M4 8h16l-1.2 11a2 2 0 0 1-2 1.8H7.2a2 2 0 0 1-2-1.8Z" strokeLinejoin="round" />
+            <path d="M8.5 8a3.5 3.5 0 0 1 7 0" strokeLinecap="round" />
+          </svg>
+        </div>
+        <div>
+          <h1 className="header__title">TeamX
+          Kitchen</h1>
+          <p className="header__subtitle">
+            Zone batching 
+          </p>
+        </div>
+      </div>
+      <div className="header__tools">
+        <span className="clock" aria-label="Current time">{formatClockWithSeconds(now)}</span>
+        <button type="button" className={`btn btn--sm ${simulating ? 'btn--live' : ''}`}
+          onClick={onToggleSimulation} aria-pressed={simulating}
+          title="Generate a random order every few seconds">
+          <span className={`live-dot ${simulating ? 'live-dot--on' : ''}`} aria-hidden="true" />
+          {simulating ? 'Live: on' : 'Live: off'}
+        </button>
+        <button type="button" className="btn btn--sm" onClick={onReload} title="Reload the board">Reload</button>
+        <button type="button" className="btn btn--sm btn--ghost" onClick={onForceError}
+          title="Force the next load to fail, to preview the error state">Fail load</button>
+        <button type="button" className="btn btn--sm btn--icon" onClick={onToggleTheme}
+          aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
+          title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}>
+          {theme === 'dark' ? '☀' : '☾'}
+        </button>
+      </div>
+    </header>
+  );
+}
+
+function StatCard({ label, value, hint, accent = 'default' }) {
+  return (
+    <div className={`stat stat--${accent}`}>
+      <span className="stat__label">{label}</span>
+      <span className="stat__value">{value}</span>
+      {hint ? <span className="stat__hint">{hint}</span> : null}
+    </div>
+  );
+}
+
+function StatsBar({ stats }: { stats: Stats }) {
+  const utilization = roundTo(stats.capacityUtilization, 0);
+  return (
+    <section className="stats" aria-label="Dashboard statistics">
+      <div className="stats__grid">
+        <StatCard label="Active orders" value={String(stats.activeOrders)}
+          hint={`${stats.totalOrders} total · ${stats.completedOrders} done`} />
+        <StatCard label="Batches" value={String(stats.totalBatches)}
+          hint={`${stats.splitBatches} from capacity splits`}
+          accent={stats.splitBatches > 0 ? 'warn' : 'default'} />
+        <StatCard label="Avg items / batch" value={String(roundTo(stats.avgItemsPerBatch, 1))}
+          hint={`cap is ${MAX_ITEMS_PER_BATCH} items`} />
+        <StatCard label="Capacity used" value={`${utilization}%`}
+          hint={`${stats.totalItems} items batched`} accent={utilization >= 80 ? 'good' : 'default'} />
+      </div>
+      <div className="zone-bars">
+        {ZONES.map((zone) => {
+          const zs = stats.byZone[zone];
+          const share = stats.totalItems === 0 ? 0 : (zs.items / stats.totalItems) * 100;
+          return (
+            <div className="zone-bar" key={zone}>
+              <div className="zone-bar__head">
+                <span className={`zone-dot zone-dot--${zone.toLowerCase()}`} aria-hidden="true" />
+                <span className="zone-bar__name">{zone}</span>
+                <span className="zone-bar__count">{pluralize(zs.batches, 'batch', 'batches')}</span>
+              </div>
+              <div className="zone-bar__track" role="img"
+                aria-label={`${zone}: ${zs.items} items across ${zs.batches} batches`}>
+                <div className={`zone-bar__fill zone-bar__fill--${zone.toLowerCase()}`}
+                  style={{ width: `${share}%` }} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+let lineKey = 0;
+let formCounter = 0;
+const newLine = () => ({ key: (lineKey += 1), name: '', quantity: 1 });
+
+function OrderForm({ onCreate }: { onCreate: (o: Order) => void }) {
+  const [customer, setCustomer] = useState('');
+  const [zone, setZone] = useState<Zone>('North');
+  const [lines, setLines] = useState(() => [newLine()]);
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [flash, setFlash] = useState<string | null>(null);
+
+  const totalItems = useMemo(
+    () => lines.reduce((s, l) => s + (Number.isFinite(l.quantity) ? l.quantity : 0), 0),
+    [lines],
+  );
+
+  const updateLine = (key: number, patch) =>
+    setLines((c) => c.map((l) => (l.key === key ? { ...l, ...patch } : l)));
+  const removeLine = (key: number) =>
+    setLines((c) => (c.length === 1 ? c : c.filter((l) => l.key !== key)));
+
+  function handleSubmit(event) {
+    event.preventDefault();
+    const next: Record<string, string> = {};
+    if (customer.trim().length === 0) next.customer = 'Customer name is required.';
+
+    const named = lines.filter((l) => l.name.trim().length > 0);
+    if (named.length === 0) next.items = 'Add at least one item.';
+    else if (named.some((l) => !Number.isInteger(l.quantity) || l.quantity < 1))
+      next.items = 'Every quantity must be a whole number of 1 or more.';
+
+    setErrors(next);
+    if (Object.keys(next).length > 0) return;
+
+    formCounter += 1;
+    onCreate({
+      id: `NEW-${Date.now().toString(36)}-${formCounter}`,
+      customer: customer.trim(),
+      zone,
+      items: named.map((l) => ({ name: l.name.trim(), quantity: l.quantity })),
+      createdAt: Date.now(),
+      status: 'pending',
+    });
+
+    setFlash(`Order for ${customer.trim()} added to ${zone}.`);
+    setCustomer('');
+    setLines([newLine()]);
+    setErrors({});
+    window.setTimeout(() => setFlash(null), 2600);
+  }
+
+  return (
+    <form className="panel order-form" onSubmit={handleSubmit} noValidate>
+      <h2 className="panel__title">New order</h2>
+
+      <label className="field">
+        <span className="field__label">Customer</span>
+        <input className={`input ${errors.customer ? 'input--invalid' : ''}`} value={customer}
+          onChange={(e) => setCustomer(e.target.value)} placeholder="e.g. Ava Reyes"
+          aria-invalid={Boolean(errors.customer)} />
+        {errors.customer ? <span className="field__error">{errors.customer}</span> : null}
+      </label>
+
+      <label className="field">
+        <span className="field__label">Zone</span>
+        <select className="input" value={zone} onChange={(e) => setZone(e.target.value as Zone)}>
+          {ZONES.map((z) => <option key={z} value={z}>{z}</option>)}
+        </select>
+      </label>
+
+      <fieldset className="field field--items">
+        <legend className="field__label">Items</legend>
+        {lines.map((line) => (
+          <div className="line" key={line.key}>
+            <input className="input line__name" value={line.name} aria-label="Item name"
+              onChange={(e) => updateLine(line.key, { name: e.target.value })} placeholder="Dish name" />
+            <input className="input line__qty" type="number" min={1} max={99} value={line.quantity}
+              aria-label="Quantity"
+              onChange={(e) => updateLine(line.key, { quantity: Number(e.target.value) })} />
+            <button type="button" className="btn btn--icon" onClick={() => removeLine(line.key)}
+              disabled={lines.length === 1} aria-label="Remove item" title="Remove item">×</button>
+          </div>
+        ))}
+        <button type="button" className="btn btn--ghost" onClick={() => setLines((c) => [...c, newLine()])}>
+          + Add item
+        </button>
+        {errors.items ? <span className="field__error">{errors.items}</span> : null}
+      </fieldset>
+
+      <div className={`capacity-hint ${totalItems > MAX_ITEMS_PER_BATCH ? 'capacity-hint--over' : ''}`}>
+        <strong>{totalItems}</strong> {totalItems === 1 ? 'item' : 'items'}
+        {totalItems > MAX_ITEMS_PER_BATCH
+          ? <span> · over the {MAX_ITEMS_PER_BATCH}-item cap, this order gets a batch of its own</span>
+          : <span> · cap is {MAX_ITEMS_PER_BATCH} per batch</span>}
+      </div>
+
+      <button type="submit" className="btn btn--primary btn--block">Add order</button>
+
+      <div className="form-flash" role="status" aria-live="polite">
+        {flash ? <span className="form-flash__msg">{flash}</span> : null}
+      </div>
+    </form>
+  );
+}
+
+const STATUS_FILTERS: StatusFilter[] = ['all', 'collecting', 'ready', 'preparing', 'completed'];
+
+function FilterBar({ filters, onChange, onClear, resultCount, totalCount }) {
+  return (
+    <section className="filters" aria-label="Filters">
+      <div className="filters__search">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+          <circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" strokeLinecap="round" />
+        </svg>
+        <input className="input input--search" type="search" value={filters.search}
+          placeholder="Search customer, order ID, or dish…" aria-label="Search orders"
+          onChange={(e) => onChange({ ...filters, search: e.target.value })} />
+      </div>
+
+      <div className="chips" role="group" aria-label="Filter by zone">
+        <button type="button" className={`chip ${filters.zone === 'all' ? 'chip--active' : ''}`}
+          onClick={() => onChange({ ...filters, zone: 'all' })} aria-pressed={filters.zone === 'all'}>
+          All zones
+        </button>
+        {ZONES.map((z) => (
+          <button key={z} type="button" className={`chip ${filters.zone === z ? 'chip--active' : ''}`}
+            onClick={() => onChange({ ...filters, zone: z })} aria-pressed={filters.zone === z}>
+            <span className={`zone-dot zone-dot--${z.toLowerCase()}`} aria-hidden="true" />{z}
+          </button>
+        ))}
+      </div>
+
+      <div className="chips" role="group" aria-label="Filter by batch status">
+        {STATUS_FILTERS.map((s) => (
+          <button key={s} type="button" className={`chip chip--status ${filters.status === s ? 'chip--active' : ''}`}
+            onClick={() => onChange({ ...filters, status: s })} aria-pressed={filters.status === s}>
+            {s === 'all' ? 'Any status' : s}
+          </button>
+        ))}
+      </div>
+
+      <div className="filters__meta">
+        <span className="filters__count">
+          Showing {resultCount} of {totalCount} {totalCount === 1 ? 'batch' : 'batches'}
+        </span>
+        {isFilterActive(filters)
+          ? <button type="button" className="btn btn--ghost btn--sm" onClick={onClear}>Clear filters</button>
+          : null}
+      </div>
+    </section>
+  );
+}
+
+const STATUS_LABEL: Record<BatchStatus, string> = {
+  collecting: 'Collecting', ready: 'Ready', preparing: 'Preparing', completed: 'Completed',
+};
+
+function OrderRow({ order, now, onCancel }) {
+  return (
+    <li className={`order-row order-row--${order.status}`}>
+      <div className="order-row__main">
+        <span className="order-row__customer">{order.customer}</span>
+        <span className="order-row__id">{order.id}</span>
+      </div>
+      <div className="order-row__items">
+        {order.items.map((item, i) => (
+          <span className="order-row__item" key={`${order.id}-${item.name}-${i}`}>
+            {item.name}<span className="order-row__qty">×{item.quantity}</span>
+          </span>
+        ))}
+      </div>
+      <div className="order-row__side">
+        <span className="order-row__time" title={formatClock(order.createdAt)}>
+          {formatRelative(order.createdAt, now)}
+        </span>
+        <span className="order-row__count">{pluralize(countItems(order), 'item')}</span>
+        {order.status === 'pending' ? (
+          <button type="button" className="btn btn--icon btn--danger-ghost" onClick={() => onCancel(order.id)}
+            aria-label={`Cancel order ${order.id}`} title="Cancel order">×</button>
+        ) : null}
+      </div>
+    </li>
+  );
+}
+
+function BatchCard({ batch, now, index, onStart, onComplete, onCancelOrder }) {
+  const fill = Math.min(100, (batch.itemCount / MAX_ITEMS_PER_BATCH) * 100);
+  return (
+    <article
+      className={`batch-card batch-card--${batch.status} ${batch.isOversized ? 'batch-card--oversized' : ''}`}
+      style={{ animationDelay: `${Math.min(index, 12) * 45}ms` }}
+      aria-label={`${batch.zone} batch, ${STATUS_LABEL[batch.status]}`}>
+      <header className="batch-card__head">
+        <div className="batch-card__title">
+          <span className={`zone-badge zone-badge--${batch.zone.toLowerCase()}`}>{batch.zone}</span>
+          {batch.isSplit ? (
+            <span className="tag tag--split" title="Capacity forced this window to split">
+              Part {batch.partIndex} of {batch.partCount}
+            </span>
+          ) : null}
+          {batch.isOversized ? (
+            <span className="tag tag--warn" title="A single order exceeds the item cap">Oversized</span>
+          ) : null}
+        </div>
+        <span className={`pill pill--${batch.status}`}>
+          <span className="pill__dot" aria-hidden="true" />{STATUS_LABEL[batch.status]}
+        </span>
+      </header>
+
+      <div className="batch-card__window">
+        <span>{formatClock(batch.windowStart)} – {formatClock(batch.windowEnd)}</span>
+        {batch.status === 'collecting' ? (
+          <span className="batch-card__countdown">closes in {formatCountdown(batch.windowEnd, now)}</span>
+        ) : null}
+      </div>
+
+      <div className="meter" title={`${batch.itemCount} of ${MAX_ITEMS_PER_BATCH} items`}>
+        <div className="meter__track">
+          <div className={`meter__fill ${batch.itemCount >= MAX_ITEMS_PER_BATCH ? 'meter__fill--full' : ''}`}
+            style={{ width: `${fill}%` }} />
+        </div>
+        <span className="meter__label">{batch.itemCount}/{MAX_ITEMS_PER_BATCH} items</span>
+      </div>
+
+      <ul className="order-list">
+        {batch.orders.map((o) => <OrderRow key={o.id} order={o} now={now} onCancel={onCancelOrder} />)}
+      </ul>
+
+      <footer className="batch-card__foot">
+        <span className="batch-card__summary">{pluralize(batch.orders.length, 'order')}</span>
+        <div className="batch-card__actions">
+          {batch.status === 'completed'
+            ? <span className="done-mark">✓ Done</span>
+            : batch.status === 'preparing'
+              ? <button type="button" className="btn btn--sm btn--primary" onClick={() => onComplete(batch)}>Mark complete</button>
+              : <button type="button" className="btn btn--sm" onClick={() => onStart(batch)}>Start preparing</button>}
+        </div>
+      </footer>
+    </article>
+  );
+}
+
+function LoadingState() {
+  return (
+    <div className="state" role="status" aria-live="polite">
+      <div className="skeleton-grid">
+        {[0, 1, 2, 3].map((i) => (
+          <div className="skeleton-card" key={i} style={{ animationDelay: `${i * 90}ms` }}>
+            <div className="skeleton-line skeleton-line--title" />
+            <div className="skeleton-line skeleton-line--meter" />
+            <div className="skeleton-line" />
+            <div className="skeleton-line skeleton-line--short" />
+          </div>
+        ))}
+      </div>
+      <p className="state__caption state__caption--loading">Loading the dispatch board…</p>
+    </div>
+  );
+}
+
+function ErrorState({ message, onRetry }) {
+  return (
+    <div className="state state--center" role="alert">
+      <div className="state__icon state__icon--error" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" strokeWidth="2">
+          <path d="M12 8v5" strokeLinecap="round" />
+          <circle cx="12" cy="16.5" r="1" fill="currentColor" stroke="none" />
+          <path d="M10.3 3.2 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.2a2 2 0 0 0-3.4 0Z" strokeLinejoin="round" />
+        </svg>
+      </div>
+      <h2 className="state__title">Could not load orders</h2>
+      <p className="state__caption">{message}</p>
+      <button type="button" className="btn btn--primary" onClick={onRetry}>Try again</button>
+    </div>
+  );
+}
+
+function EmptyState({ hasOrders, onClear }) {
+  return (
+    <div className="state state--center">
+      <div className="state__icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" strokeWidth="2">
+          {hasOrders
+            ? <><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" strokeLinecap="round" /></>
+            : <><path d="M4 8h16l-1.2 11a2 2 0 0 1-2 1.8H7.2a2 2 0 0 1-2-1.8Z" strokeLinejoin="round" />
+                <path d="M8.5 8a3.5 3.5 0 0 1 7 0" strokeLinecap="round" /></>}
+        </svg>
+      </div>
+      <h2 className="state__title">{hasOrders ? 'No batches match your filters' : 'No orders yet'}</h2>
+      <p className="state__caption">
+        {hasOrders
+          ? 'There are orders on the board, but none of them match the current search or filters.'
+          : 'Add an order with the form, or switch on live simulation to watch batches form on their own.'}
+      </p>
+      {hasOrders ? <button type="button" className="btn" onClick={onClear}>Clear filters</button> : null}
+    </div>
+  );
+}
+
+function TestPanel() {
+  const [open, setOpen] = useState(false);
+  const results = useMemo(() => runTests(), []);
+  const passed = results.filter((r) => r.passed).length;
+  const allPass = passed === results.length;
+
+  let lastGroup = '';
+  return (
+    <section className="panel">
+      <div className="tests__head">
+        <h2 className="panel__title" style={{ marginBottom: 0 }}>Self-test</h2>
+        <span className={`tests__summary ${allPass ? 'tests__summary--pass' : 'tests__summary--fail'}`}>
+          {passed}/{results.length} passing
+        </span>
+      </div>
+      <button type="button" className="btn btn--ghost btn--sm" onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}>
+        {open ? 'Hide details' : 'Show details'}
+      </button>
+      {open ? (
+        <div className="tests__list" style={{ marginTop: 10 }}>
+          {results.map((r, i) => {
+            const header = r.group !== lastGroup ? r.group : null;
+            lastGroup = r.group;
+            return (
+              <React.Fragment key={i}>
+                {header ? <div className="tests__group">{header}</div> : null}
+                <div className="tests__item">
+                  <span className={`tests__mark ${r.passed ? 'tests__mark--pass' : 'tests__mark--fail'}`}>
+                    {r.passed ? '✓' : '✕'}
+                  </span>
+                  <span>
+                    {r.name}
+                    {r.error ? <div className="tests__error">{r.error}</div> : null}
+                  </span>
+                </div>
+              </React.Fragment>
+            );
+          })}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+/* ============================================================================
+   APP
+   ========================================================================== */
+
+const SIMULATION_INTERVAL_MS = 3500;
+
+function App() {
+  const now = useNow(1000);
+  const { theme, toggleTheme } = useTheme();
+
+  const [orders, setOrders] = useState<Order[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [simulating, setSimulating] = useState(false);
+  const [filters, setFilters] = useState<BatchFilters>(NO_FILTERS);
+
+  const load = useCallback((shouldFail: boolean) => {
+    setLoading(true);
+    setError(null);
+    fetchOrders({ fail: shouldFail })
+      .then(setOrders)
+      .catch((err) => { setError(err.message); setOrders([]); })
+      .finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => { load(false); }, [load]);
+
+  useEffect(() => {
+    if (!simulating) return undefined;
+    const id = window.setInterval(() => setOrders((c) => [...c, randomOrder()]), SIMULATION_INTERVAL_MS);
+    return () => window.clearInterval(id);
+  }, [simulating]);
+
+  const batches = useMemo(() => batchOrders(orders, { now }), [orders, now]);
+  const stats = useMemo(() => computeStats(orders, batches), [orders, batches]);
+  const visibleBatches = useMemo(() => filterBatches(batches, filters), [batches, filters]);
+  const byZone = useMemo(() => groupBatchesByZone(visibleBatches, ZONES), [visibleBatches]);
+
+  const applyStatus = useCallback((ids: Set<string>, status: OrderStatus, onlyFrom?: OrderStatus) => {
+    setOrders((c) => c.map((o) => {
+      if (!ids.has(o.id)) return o;
+      if (onlyFrom && o.status !== onlyFrom) return o;
+      return { ...o, status };
+    }));
+  }, []);
+
+  const startBatch = useCallback((b: Batch) =>
+    applyStatus(new Set(b.orders.map((o) => o.id)), 'preparing', 'pending'), [applyStatus]);
+  const completeBatch = useCallback((b: Batch) =>
+    applyStatus(new Set(b.orders.map((o) => o.id)), 'completed'), [applyStatus]);
+  const cancelOrder = useCallback((id: string) =>
+    applyStatus(new Set([id]), 'cancelled'), [applyStatus]);
+  const addOrder = useCallback((o: Order) => setOrders((c) => [...c, o]), []);
+  const clearFilters = useCallback(() => setFilters(NO_FILTERS), []);
+
+  function renderBoard() {
+    if (loading) return <LoadingState />;
+    if (error) return <ErrorState message={error} onRetry={() => load(false)} />;
+    if (visibleBatches.length === 0)
+      return <EmptyState hasOrders={batches.length > 0} onClear={clearFilters} />;
+
+    let cardIndex = -1;
+    return (
+      <div className="zones">
+        {byZone.map(([zone, zoneBatches]) => {
+          const items = zoneBatches.reduce((s, b) => s + b.itemCount, 0);
+          return (
+            <section className="zone-section" key={zone}>
+              <div className="zone-section__head">
+                <h2 className="zone-section__title">
+                  <span className={`zone-dot zone-dot--${zone.toLowerCase()}`} aria-hidden="true" />{zone}
+                </h2>
+                <span className="zone-section__meta">
+                  {pluralize(zoneBatches.length, 'batch', 'batches')} · {items} items
+                </span>
+              </div>
+              <div className="batch-grid">
+                {zoneBatches.map((batch) => {
+                  cardIndex += 1;
+                  return (
+                    <BatchCard key={batch.id} batch={batch} now={now} index={cardIndex}
+                      onStart={startBatch} onComplete={completeBatch} onCancelOrder={cancelOrder} />
+                  );
+                })}
+              </div>
+            </section>
+          );
+        })}
+      </div>
+    );
+  }
+
+  return (
+    <div className="app">
+      <Header theme={theme} onToggleTheme={toggleTheme} simulating={simulating}
+        onToggleSimulation={() => setSimulating((s) => !s)}
+        onReload={() => load(false)} onForceError={() => load(true)} now={now} />
+
+      <StatsBar stats={stats} />
+
+      <div className="layout">
+        <aside className="layout__side">
+          <OrderForm onCreate={addOrder} />
+          <TestPanel />
+        </aside>
+        <main className="layout__main">
+          <FilterBar filters={filters} onChange={setFilters} onClear={clearFilters}
+            resultCount={visibleBatches.length} totalCount={batches.length} />
+          {renderBoard()}
+        </main>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <React.StrictMode><App /></React.StrictMode>,
+);
+</script>
+</body>
+</html>
