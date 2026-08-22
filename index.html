@@ -514,7 +514,6 @@ function splitByCapacity(orders: Order[], maxItems: number): Order[][] {
 
         chunks.push([{
           ...order,
-          id: `${order.id}-part`,
           items: chunkItemsList
         }]);
       }
